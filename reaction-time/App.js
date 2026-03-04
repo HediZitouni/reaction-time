@@ -39,7 +39,7 @@ export default function App() {
   const handleScreenClick = () => {
     if (!gameActive) {
       setMessage("Wait for green");
-      const randomDelay = Math.floor(Math.random() * 1) + 1;
+      const randomDelay = Math.floor(Math.random() * 7) + 4;
       setGameActive(true);
       setCurrentTimeout(
         setTimeout(() => {
