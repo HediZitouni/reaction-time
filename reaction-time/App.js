@@ -26,7 +26,6 @@ const COLORS = {
 };
 
 const NO_SCORE = Number.MAX_SAFE_INTEGER;
-const TIE_THRESHOLD_MS = 15;
 
 const PHASE = {
   IDLE: "idle",
@@ -470,8 +469,7 @@ function MultiGame({ onBack }) {
       return { top: true, bottom: false };
     }
     if (topScore !== null && bottomScore !== null) {
-      const diff = Math.abs(topScore - bottomScore);
-      if (diff <= TIE_THRESHOLD_MS) {
+      if (topScore === bottomScore) {
         return { top: true, bottom: true };
       }
       return topScore < bottomScore
