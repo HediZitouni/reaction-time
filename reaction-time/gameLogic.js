@@ -229,8 +229,15 @@ export function beginPartyGo(state, now) {
   return true;
 }
 
-export function applyTouchStarts(state, touchPoints, padSize, layout) {
+export function applyTouchStarts(
+  state,
+  touchPoints,
+  padSize,
+  layout,
+  now = performance.now()
+) {
   const next = clonePartyState(state);
+  const lobbyPlayers = [];
 
   for (const { id, x, y } of touchPoints) {
     const playerIndex = getPlayerIndexFromTouch(
@@ -241,141 +248,99 @@ export function applyTouchStarts(state, touchPoints, padSize, layout) {
       layout
     );
 
-    if (
-      next.phase === PHASE.IDLE ||
-      next.phase === PHASE.RESULT ||
-      next.phase === PHASE.WAITING ||
-      next.phase === PHASE.GO
-    ) {
+    if (next.phase === PHASE.IDLE || next.phase === PHASE.RESULT) {
       if (!playerHasActiveTouch(playerIndex, next.activeTouches)) {
         next.activeTouches.set(id, playerIndex);
+        lobbyPlayers.push(playerIndex);
+      }
+      continue;
+    }
+
+    if (next.phase === PHASE.WAITING || next.phase === PHASE.GO) {
+      if (playerHasActiveTouch(playerIndex, next.activeTouches)) continue;
+
+      next.activeTouches.set(id, playerIndex);
+      next.zoneArmed[playerIndex] = true;
+
+      if (next.phase === PHASE.WAITING) {
+        recordPartyFoul(next, playerIndex);
+      } else if (next.goTimestamp !== null) {
+        if (now < next.goTimestamp) {
+          recordPartyFoul(next, playerIndex);
+        } else {
+          recordPartyScore(next, playerIndex, now);
+        }
       }
     }
   }
 
+  if (lobbyPlayers.length > 0) {
+    applyLobbyPresses(next, [...new Set(lobbyPlayers)]);
+  }
+
   tryFinishPartyRound(next);
   return next;
 }
 
-export function applyTouchReleases(
-  state,
-  touchPoints,
-  shouldPress,
-  padSize,
-  layout,
-  now = Date.now()
-) {
+export function applyTouchReleases(state, touchPoints) {
   const next = clonePartyState(state);
-  const playerIndices = [];
 
-  for (const { id, x, y } of touchPoints) {
+  for (const { id } of touchPoints) {
     const tracked = next.activeTouches.get(id);
     next.activeTouches.delete(id);
 
-    if (!shouldPress) continue;
-
-    const playerIndex =
-      tracked !== undefined
-        ? tracked
-        : next.phase === PHASE.WAITING || next.phase === PHASE.GO
-          ? getPlayerIndexFromTouch(
-              x,
-              y,
-              padSize.width,
-              padSize.height,
-              layout
-            )
-          : null;
-
-    if (playerIndex === null || playerIndex === undefined) continue;
-    playerIndices.push(playerIndex);
-  }
-
-  if (!shouldPress || playerIndices.length === 0) {
-    return next;
-  }
-
-  const uniqueIndices = [...new Set(playerIndices)];
-
-  if (next.phase === PHASE.IDLE || next.phase === PHASE.RESULT) {
-    applyLobbyPresses(next, uniqueIndices);
-    return next;
-  }
-
-  for (const playerIndex of uniqueIndices) {
-    if (next.phase === PHASE.WAITING) {
-      recordPartyFoul(next, playerIndex);
-    } else if (next.phase === PHASE.GO) {
-      recordPartyScore(next, playerIndex, now);
+    if (tracked !== undefined && !playerHasActiveTouch(tracked, next.activeTouches)) {
+      next.zoneArmed[tracked] = false;
     }
   }
 
-  tryFinishPartyRound(next);
   return next;
 }
 
-function clearPlayerTouches(state, playerIndex) {
-  for (const [id, index] of [...state.activeTouches.entries()]) {
-    if (index === playerIndex) {
-      state.activeTouches.delete(id);
-    }
-  }
-}
 
-function processZoneRelease(state, playerIndex, now) {
-  if (!state.zoneArmed[playerIndex]) {
-    return false;
-  }
-
-  if (state.phase === PHASE.WAITING) {
-    recordPartyFoul(state, playerIndex);
-    tryFinishPartyRound(state);
-  } else if (state.phase === PHASE.GO) {
-    recordPartyScore(state, playerIndex, now);
-    tryFinishPartyRound(state);
-  }
-
-  state.zoneArmed[playerIndex] = false;
-  clearPlayerTouches(state, playerIndex);
-  return true;
-}
-
-export function applyZoneTouchStart(state, playerIndex, touchId) {
+export function applyZoneTouchStart(
+  state,
+  playerIndex,
+  touchId,
+  now = performance.now()
+) {
   const next = clonePartyState(state);
-  const hasTracked = playerHasActiveTouch(playerIndex, next.activeTouches);
 
-  if (hasTracked) {
+  if (next.phase === PHASE.IDLE || next.phase === PHASE.RESULT) {
+    applyLobbyPresses(next, [playerIndex]);
+    return next;
+  }
+
+  if (playerHasActiveTouch(playerIndex, next.activeTouches)) {
     return next;
   }
 
   next.activeTouches.set(touchId, playerIndex);
-  if (next.phase === PHASE.WAITING || next.phase === PHASE.GO) {
-    next.zoneArmed[playerIndex] = true;
+  next.zoneArmed[playerIndex] = true;
+
+  if (next.phase === PHASE.WAITING) {
+    recordPartyFoul(next, playerIndex);
+    tryFinishPartyRound(next);
+  } else if (next.phase === PHASE.GO && next.goTimestamp !== null) {
+    if (now < next.goTimestamp) {
+      recordPartyFoul(next, playerIndex);
+    } else {
+      recordPartyScore(next, playerIndex, now);
+    }
+    tryFinishPartyRound(next);
   }
+
   return next;
 }
 
-export function applyZoneTouchRelease(
-  state,
-  playerIndex,
-  touchId,
-  shouldPress,
-  now = Date.now()
-) {
+export function applyZoneTouchRelease(state, playerIndex, touchId) {
   const next = clonePartyState(state);
   next.activeTouches.delete(touchId);
 
-  if (!shouldPress) {
-    return next;
+  if (!playerHasActiveTouch(playerIndex, next.activeTouches)) {
+    next.zoneArmed[playerIndex] = false;
   }
 
-  if (next.phase === PHASE.IDLE || next.phase === PHASE.RESULT) {
-    applyLobbyPresses(next, [playerIndex]);
-    clearPlayerTouches(next, playerIndex);
-    return next;
-  }
-
-  processZoneRelease(next, playerIndex, now);
   return next;
 }
 

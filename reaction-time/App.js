@@ -6,6 +6,8 @@ import {
   StyleSheet,
   Animated,
   SafeAreaView,
+  Alert,
+  Platform,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import {
@@ -16,6 +18,12 @@ import {
   getPlayerIndexFromTouch,
   computePartyRankings,
 } from "./gameLogic";
+import { gameNow } from "./timing";
+import {
+  loadBestScore,
+  saveBestScore,
+  clearPersistedBestScore,
+} from "./storage";
 
 const COLORS = {
   idle: "#0f0f14",
@@ -67,8 +75,21 @@ const DEFAULT_PLAYERS = 2;
 
 function getPlayerCountSubtitle(count) {
   if (count === 1) return "Mesurez votre temps de réaction";
-  if (count === 2) return "Appuyez chacun pour lancer";
+  if (count === 2) return "Appuyez chacun sur votre zone pour lancer";
   return "Placez-vous autour de l'écran, chacun sur sa zone numérotée.";
+}
+
+function ReadyIndicator({ readyCount, playerCount, phase }) {
+  const isLobby = phase === PHASE.IDLE || phase === PHASE.RESULT;
+  if (!isLobby || playerCount <= 1) return null;
+
+  return (
+    <View style={styles.readyIndicator}>
+      <Text style={styles.readyIndicatorText}>
+        {readyCount}/{playerCount} prêts
+      </Text>
+    </View>
+  );
 }
 
 function formatRank(rank) {
@@ -495,179 +516,82 @@ function isKnownPlayer(player) {
   return player !== null && player !== undefined && player !== -1;
 }
 
-function mapHasPlayer(map, player) {
-  for (const assigned of map.values()) {
-    if (assigned === player) return true;
-  }
-  return false;
-}
-
-// A finger held still can be re-issued by the OS with a new identifier, so a
-// zone keeps its player assignment for as long as any finger stays on it.
-function collectStickyTouches(event, previousTouches, getTouchPlayer, dropChanged) {
-  const nextTouches = new Map();
-  const endedIds = dropChanged
-    ? new Set(Array.from(getChangedTouches(event), (touch) => touch.identifier))
-    : null;
-
-  for (const touch of getActiveTouches(event)) {
-    if (endedIds && endedIds.has(touch.identifier)) continue;
-    const tracked = previousTouches.get(touch.identifier);
-    const player = tracked !== undefined ? tracked : getTouchPlayer(touch);
-    if (!isKnownPlayer(player)) continue;
-    nextTouches.set(touch.identifier, player);
-  }
-
-  return nextTouches;
-}
-
-// While fingers rest on screen the OS sometimes emits a spurious end/start
-// burst for a finger that never left. During GO a lift must be acted on
-// instantly because it is the measurement, so only the foul phase waits for the
-// zone to stay empty before committing.
-const FOUL_CONFIRM_MS = 120;
-
-function usePadTouchTracking({
-  phaseRef,
-  getTouchPlayer,
-  createArmedState,
-  onPress,
-  onVisualUpdate,
-}) {
+function usePadTouchTracking({ getTouchPlayer, onPress, onVisualUpdate }) {
   const activeTouchesRef = useRef(new Map());
-  const armedRef = useRef(createArmedState());
-  const pendingReleasesRef = useRef(new Map());
-  const releaseTimersRef = useRef(new Set());
-
-  const isHoldPhase = useCallback(
-    () => phaseRef.current === PHASE.WAITING || phaseRef.current === PHASE.GO,
-    [phaseRef]
-  );
 
   const publishVisual = useCallback(() => {
-    onVisualUpdate(activeTouchesRef.current, armedRef.current);
+    onVisualUpdate(activeTouchesRef.current);
   }, [onVisualUpdate]);
 
-  const cancelPendingReleases = useCallback(() => {
-    for (const timer of releaseTimersRef.current) {
-      clearTimeout(timer);
-    }
-    releaseTimersRef.current.clear();
-    pendingReleasesRef.current.clear();
-  }, []);
-
   const resetTracking = useCallback(() => {
-    cancelPendingReleases();
     activeTouchesRef.current = new Map();
-    armedRef.current = createArmedState();
     publishVisual();
-  }, [cancelPendingReleases, createArmedState, publishVisual]);
-
-  const applyTouchSnapshot = useCallback(
-    (event, dropChanged) => {
-      activeTouchesRef.current = collectStickyTouches(
-        event,
-        activeTouchesRef.current,
-        getTouchPlayer,
-        dropChanged
-      );
-
-      const holding = isHoldPhase();
-      for (const player of activeTouchesRef.current.values()) {
-        if (holding) armedRef.current[player] = true;
-        pendingReleasesRef.current.delete(player);
-      }
-    },
-    [getTouchPlayer, isHoldPhase]
-  );
-
-  const applyRelease = useCallback(
-    (player, releasedAt) => {
-      armedRef.current[player] = false;
-      onPress(player, releasedAt);
-    },
-    [onPress]
-  );
-
-  const confirmFoul = useCallback(
-    (player, releasedAt) => {
-      if (pendingReleasesRef.current.get(player) !== releasedAt) return;
-      pendingReleasesRef.current.delete(player);
-      if (mapHasPlayer(activeTouchesRef.current, player)) return;
-
-      applyRelease(player, releasedAt);
-      publishVisual();
-    },
-    [applyRelease, publishVisual]
-  );
-
-  const scheduleFoul = useCallback(
-    (player, releasedAt) => {
-      pendingReleasesRef.current.set(player, releasedAt);
-      const timer = setTimeout(() => {
-        releaseTimersRef.current.delete(timer);
-        confirmFoul(player, releasedAt);
-      }, FOUL_CONFIRM_MS);
-      releaseTimersRef.current.add(timer);
-    },
-    [confirmFoul]
-  );
+  }, [publishVisual]);
 
   const handlePadTouchStart = useCallback(
     (event) => {
-      applyTouchSnapshot(event, false);
+      const pressedAt = gameNow();
+      const previous = activeTouchesRef.current;
+      const nextTouches = new Map(previous);
+
+      for (const touch of getActiveTouches(event)) {
+        if (previous.has(touch.identifier)) {
+          nextTouches.set(touch.identifier, previous.get(touch.identifier));
+          continue;
+        }
+
+        const player = getTouchPlayer(touch);
+        if (!isKnownPlayer(player)) continue;
+
+        nextTouches.set(touch.identifier, player);
+        onPress(player, pressedAt);
+      }
+
+      activeTouchesRef.current = nextTouches;
       publishVisual();
     },
-    [applyTouchSnapshot, publishVisual]
+    [getTouchPlayer, onPress, publishVisual]
   );
 
   const handlePadTouchMove = useCallback(
     (event) => {
-      applyTouchSnapshot(event, false);
+      const pressedAt = gameNow();
+      const previous = activeTouchesRef.current;
+      const nextTouches = new Map();
+
+      for (const touch of getActiveTouches(event)) {
+        const tracked = previous.get(touch.identifier);
+        const player = tracked !== undefined ? tracked : getTouchPlayer(touch);
+        if (!isKnownPlayer(player)) continue;
+
+        if (tracked === undefined) {
+          onPress(player, pressedAt);
+        }
+        nextTouches.set(touch.identifier, player);
+      }
+
+      activeTouchesRef.current = nextTouches;
       publishVisual();
     },
-    [applyTouchSnapshot, publishVisual]
+    [getTouchPlayer, onPress, publishVisual]
   );
 
   const handlePadTouchRelease = useCallback(
-    (event, shouldPress) => {
-      const releasedAt = Date.now();
-      const isWaiting = phaseRef.current === PHASE.WAITING;
-      const endedPlayers = new Set();
+    (event) => {
+      const endedIds = new Set(
+        Array.from(getChangedTouches(event), (touch) => touch.identifier)
+      );
+      const nextTouches = new Map(activeTouchesRef.current);
 
-      for (const touch of getChangedTouches(event)) {
-        const tracked = activeTouchesRef.current.get(touch.identifier);
-        const player = tracked !== undefined ? tracked : getTouchPlayer(touch);
-        if (isKnownPlayer(player)) endedPlayers.add(player);
+      for (const id of endedIds) {
+        nextTouches.delete(id);
       }
 
-      applyTouchSnapshot(event, true);
-
-      if (shouldPress) {
-        for (const player of endedPlayers) {
-          if (mapHasPlayer(activeTouchesRef.current, player)) continue;
-
-          if (isWaiting) {
-            scheduleFoul(player, releasedAt);
-          } else {
-            applyRelease(player, releasedAt);
-          }
-        }
-      }
-
+      activeTouchesRef.current = nextTouches;
       publishVisual();
     },
-    [
-      applyRelease,
-      applyTouchSnapshot,
-      getTouchPlayer,
-      phaseRef,
-      publishVisual,
-      scheduleFoul,
-    ]
+    [publishVisual]
   );
-
-  useEffect(() => cancelPendingReleases, [cancelPendingReleases]);
 
   return {
     handlePadTouchStart,
@@ -710,26 +634,12 @@ function PartyGame({ playerCount, onBack }) {
     setStarted(next);
   }, [playerCount]);
 
-  const createArmedState = useCallback(
-    () => createPlayerArray(playerCount, false),
-    [playerCount]
-  );
-
   const updatePressedVisual = useCallback(
-    (activeTouches, armed) => {
+    (activeTouches) => {
       const next = createPlayerArray(playerCount, false);
-      const currentPhase = phaseRef.current;
-
-      if (currentPhase === PHASE.WAITING || currentPhase === PHASE.GO) {
-        for (let i = 0; i < playerCount; i++) {
-          next[i] = armed[i];
-        }
-      } else {
-        for (const playerIndex of activeTouches.values()) {
-          next[playerIndex] = true;
-        }
+      for (const playerIndex of activeTouches.values()) {
+        next[playerIndex] = true;
       }
-
       setPressed(next);
     },
     [playerCount]
@@ -750,8 +660,8 @@ function PartyGame({ playerCount, onBack }) {
     [layout]
   );
 
-  const notifyPress = useCallback((playerIndex, releasedAt) => {
-    pressHandlerRef.current(playerIndex, releasedAt);
+  const notifyPress = useCallback((playerIndex, pressedAt) => {
+    pressHandlerRef.current(playerIndex, pressedAt);
   }, []);
 
   const {
@@ -760,9 +670,7 @@ function PartyGame({ playerCount, onBack }) {
     handlePadTouchRelease,
     resetTracking,
   } = usePadTouchTracking({
-    phaseRef,
     getTouchPlayer: getTouchPlayerIndex,
-    createArmedState,
     onPress: notifyPress,
     onVisualUpdate: updatePressedVisual,
   });
@@ -820,7 +728,7 @@ function PartyGame({ playerCount, onBack }) {
     const randomDelay = (Math.floor(Math.random() * 7) + 4) * 1000;
     goTimeoutRef.current = setTimeout(() => {
       if (phaseRef.current !== PHASE.WAITING) return;
-      goTimestampRef.current = Date.now();
+      goTimestampRef.current = gameNow();
       updatePhase(PHASE.GO);
     }, randomDelay);
   }, [clearTimers, playerCount, resetTracking, updatePhase]);
@@ -840,7 +748,7 @@ function PartyGame({ playerCount, onBack }) {
   );
 
   const recordScore = useCallback(
-    (playerIndex, releasedAt) => {
+    (playerIndex, pressedAt) => {
       if (
         !goTimestampRef.current ||
         foulsRef.current[playerIndex] ||
@@ -848,7 +756,7 @@ function PartyGame({ playerCount, onBack }) {
       ) {
         return;
       }
-      const reactionTime = releasedAt - goTimestampRef.current;
+      const reactionTime = Math.round(pressedAt - goTimestampRef.current);
       const nextScores = [...scoresRef.current];
       nextScores[playerIndex] = reactionTime;
       scoresRef.current = nextScores;
@@ -895,7 +803,7 @@ function PartyGame({ playerCount, onBack }) {
   );
 
   const handlePlayerPress = useCallback(
-    (playerIndex, releasedAt) => {
+    (playerIndex, pressedAt) => {
       const currentPhase = phaseRef.current;
 
       if (currentPhase === PHASE.IDLE || currentPhase === PHASE.RESULT) {
@@ -909,12 +817,11 @@ function PartyGame({ playerCount, onBack }) {
       }
 
       if (currentPhase === PHASE.GO) {
-        // The lift may predate GO when it is confirmed just after the switch.
-        if (goTimestampRef.current && releasedAt < goTimestampRef.current) {
+        if (goTimestampRef.current && pressedAt < goTimestampRef.current) {
           recordFoul(playerIndex);
           return;
         }
-        recordScore(playerIndex, releasedAt);
+        recordScore(playerIndex, pressedAt);
       }
     },
     [handleLobbyPresses, recordFoul, recordScore]
@@ -939,8 +846,15 @@ function PartyGame({ playerCount, onBack }) {
           >
             <Text style={styles.backButtonText}>‹ Accueil</Text>
           </Pressable>
-          <View style={styles.partyHeaderBadge}>
-            <Text style={styles.partyHeaderBadgeText}>{playerCount} joueurs</Text>
+          <View style={styles.headerRight}>
+            <ReadyIndicator
+              readyCount={readyCount}
+              playerCount={playerCount}
+              phase={phase}
+            />
+            <View style={styles.partyHeaderBadge}>
+              <Text style={styles.partyHeaderBadgeText}>{playerCount} joueurs</Text>
+            </View>
           </View>
         </View>
 
@@ -957,8 +871,8 @@ function PartyGame({ playerCount, onBack }) {
             onResponderTerminationRequest={() => false}
             onTouchStart={handlePadTouchStart}
             onTouchMove={handlePadTouchMove}
-            onTouchEnd={(event) => handlePadTouchRelease(event, true)}
-            onTouchCancel={(event) => handlePadTouchRelease(event, false)}
+            onTouchEnd={handlePadTouchRelease}
+            onTouchCancel={handlePadTouchRelease}
           >
             {layout.rows.map((row, rowIndex) => (
               <View key={`row-${rowIndex}`} style={styles.partyRow} pointerEvents="none">
@@ -1038,7 +952,7 @@ function getZoneMessage(phase, fouled, score, started, opponentReady) {
   }
   if (phase === PHASE.GO) return { main: "CLIQUEZ !", subtitle: null };
   if (phase === PHASE.WAITING) {
-    return { main: "Attendez…", subtitle: "Ne cliquez pas trop tôt" };
+    return { main: "Attendez…", subtitle: "N'appuyez pas trop tôt" };
   }
   return {
     main: "Appuyez pour commencer",
@@ -1311,24 +1225,13 @@ function MultiGame({ onBack }) {
     setStarted({ top: false, bottom: false });
   }, []);
 
-  const createArmedState = useCallback(
-    () => ({ top: false, bottom: false }),
-    []
-  );
+  const readyCount = (started.top ? 1 : 0) + (started.bottom ? 1 : 0);
 
-  const updatePressedVisual = useCallback((activeTouches, armed) => {
-    const currentPhase = phaseRef.current;
+  const updatePressedVisual = useCallback((activeTouches) => {
     const next = { top: false, bottom: false };
-
-    if (currentPhase === PHASE.WAITING || currentPhase === PHASE.GO) {
-      next.top = armed.top;
-      next.bottom = armed.bottom;
-    } else {
-      for (const playerKey of activeTouches.values()) {
-        next[playerKey] = true;
-      }
+    for (const playerKey of activeTouches.values()) {
+      next[playerKey] = true;
     }
-
     setPressed(next);
   }, []);
 
@@ -1338,8 +1241,8 @@ function MultiGame({ onBack }) {
     return touch.locationY < height / 2 ? "top" : "bottom";
   }, []);
 
-  const notifyPress = useCallback((playerKey, releasedAt) => {
-    pressHandlerRef.current(playerKey, releasedAt);
+  const notifyPress = useCallback((playerKey, pressedAt) => {
+    pressHandlerRef.current(playerKey, pressedAt);
   }, []);
 
   const {
@@ -1348,9 +1251,7 @@ function MultiGame({ onBack }) {
     handlePadTouchRelease,
     resetTracking,
   } = usePadTouchTracking({
-    phaseRef,
     getTouchPlayer: getTouchPlayerKey,
-    createArmedState,
     onPress: notifyPress,
     onVisualUpdate: updatePressedVisual,
   });
@@ -1425,7 +1326,7 @@ function MultiGame({ onBack }) {
     const randomDelay = (Math.floor(Math.random() * 7) + 4) * 1000;
     goTimeoutRef.current = setTimeout(() => {
       if (phaseRef.current !== PHASE.WAITING) return;
-      goTimestampRef.current = Date.now();
+      goTimestampRef.current = gameNow();
       updatePhase(PHASE.GO);
     }, randomDelay);
   }, [clearTimers, resetTracking, updatePhase]);
@@ -1443,7 +1344,7 @@ function MultiGame({ onBack }) {
   );
 
   const recordScore = useCallback(
-    (playerKey, releasedAt) => {
+    (playerKey, pressedAt) => {
       if (
         !goTimestampRef.current ||
         foulsRef.current[playerKey] ||
@@ -1451,7 +1352,7 @@ function MultiGame({ onBack }) {
       ) {
         return;
       }
-      const reactionTime = releasedAt - goTimestampRef.current;
+      const reactionTime = Math.round(pressedAt - goTimestampRef.current);
       scoresRef.current = { ...scoresRef.current, [playerKey]: reactionTime };
       setScores({ ...scoresRef.current });
       tryFinishRound();
@@ -1492,7 +1393,7 @@ function MultiGame({ onBack }) {
   );
 
   const handlePlayerPress = useCallback(
-    (playerKey, releasedAt) => {
+    (playerKey, pressedAt) => {
       const currentPhase = phaseRef.current;
 
       if (currentPhase === PHASE.IDLE || currentPhase === PHASE.RESULT) {
@@ -1506,11 +1407,11 @@ function MultiGame({ onBack }) {
       }
 
       if (currentPhase === PHASE.GO) {
-        if (goTimestampRef.current && releasedAt < goTimestampRef.current) {
+        if (goTimestampRef.current && pressedAt < goTimestampRef.current) {
           recordFoul(playerKey);
           return;
         }
-        recordScore(playerKey, releasedAt);
+        recordScore(playerKey, pressedAt);
       }
     },
     [handleLobbyPresses, recordFoul, recordScore]
@@ -1535,6 +1436,7 @@ function MultiGame({ onBack }) {
           >
             <Text style={styles.backButtonText}>‹ Accueil</Text>
           </Pressable>
+          <ReadyIndicator readyCount={readyCount} playerCount={2} phase={phase} />
         </View>
 
         <View style={styles.multiWrapper}>
@@ -1550,8 +1452,8 @@ function MultiGame({ onBack }) {
             onResponderTerminationRequest={() => false}
             onTouchStart={handlePadTouchStart}
             onTouchMove={handlePadTouchMove}
-            onTouchEnd={(event) => handlePadTouchRelease(event, true)}
-            onTouchCancel={(event) => handlePadTouchRelease(event, false)}
+            onTouchEnd={handlePadTouchRelease}
+            onTouchCancel={handlePadTouchRelease}
           >
             <PlayerZone
               playerKey="top"
@@ -1584,7 +1486,6 @@ function MultiGame({ onBack }) {
 function SoloGame({ onBack }) {
   const [gameActive, setGameActive] = useState(false);
   const [timerActive, setTimerActive] = useState(false);
-  const [time, setTime] = useState(0);
   const [score, setScore] = useState(NO_SCORE);
   const [bestScore, setBestScore] = useState(NO_SCORE);
   const [currentTimeout, setCurrentTimeout] = useState(null);
@@ -1595,6 +1496,33 @@ function SoloGame({ onBack }) {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const pulseLoop = useRef(null);
+  const goTimestampRef = useRef(null);
+  const bestScoreRef = useRef(NO_SCORE);
+
+  useEffect(() => {
+    let active = true;
+
+    loadBestScore().then((saved) => {
+      if (!active || saved === null) return;
+      const current = bestScoreRef.current;
+      const next = current === NO_SCORE ? saved : Math.min(current, saved);
+      bestScoreRef.current = next;
+      setBestScore(next);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const applyBestScore = useCallback((newScore) => {
+    if (!Number.isFinite(newScore) || newScore < 0) return;
+    if (newScore >= bestScoreRef.current) return;
+
+    bestScoreRef.current = newScore;
+    setBestScore(newScore);
+    void saveBestScore(newScore);
+  }, []);
 
   const getBgColor = () => {
     if (tooEarly) return COLORS.foul;
@@ -1628,22 +1556,20 @@ function SoloGame({ onBack }) {
   }, [gameActive, timerActive]);
 
   const startTimer = () => {
-    setTime(Date.now());
+    goTimestampRef.current = gameNow();
     setTimerActive(true);
     setMessage("CLIQUEZ !");
     setSubtitle("");
   };
 
-  const stopTimer = (newTime) => {
-    if (newTime) {
+  const stopTimer = (endTime) => {
+    if (endTime && goTimestampRef.current) {
       setTooEarly(false);
-      const newScore = newTime - time;
+      const newScore = Math.round(endTime - goTimestampRef.current);
       setMessage(`${newScore}`);
       setSubtitle("millisecondes");
       setScore(newScore);
-      if (newScore < bestScore) {
-        setBestScore(newScore);
-      }
+      applyBestScore(newScore);
       Animated.sequence([
         Animated.timing(fadeAnim, {
           toValue: 0.3,
@@ -1659,16 +1585,16 @@ function SoloGame({ onBack }) {
     }
     setGameActive(false);
     setTimerActive(false);
-    setTime(0);
+    goTimestampRef.current = null;
     clearTimeout(currentTimeout);
     setCurrentTimeout(null);
   };
 
-  const handleScreenClick = () => {
+  const handleScreenPress = () => {
     if (!gameActive) {
       setTooEarly(false);
       setMessage("Attendez…");
-      setSubtitle("Ne cliquez pas trop tôt");
+      setSubtitle("N'appuyez pas trop tôt");
       const randomDelay = Math.floor(Math.random() * 7) + 4;
       setGameActive(true);
       setCurrentTimeout(
@@ -1679,7 +1605,7 @@ function SoloGame({ onBack }) {
       return;
     }
     if (timerActive) {
-      stopTimer(Date.now());
+      stopTimer(gameNow());
       return;
     }
     if (gameActive && !timerActive) {
@@ -1690,12 +1616,37 @@ function SoloGame({ onBack }) {
     }
   };
 
-  const handleResetClick = () => {
+  const resetRecord = async () => {
     setTooEarly(false);
     setScore(NO_SCORE);
+    bestScoreRef.current = NO_SCORE;
     setBestScore(NO_SCORE);
     setMessage("Appuyez pour commencer");
     setSubtitle("Testez votre temps de réaction");
+    await clearPersistedBestScore();
+  };
+
+  const handleResetClick = () => {
+    const title = "Réinitialiser le record ?";
+    const message = "Votre meilleur temps sera effacé définitivement.";
+
+    if (Platform.OS === "web") {
+      if (window.confirm(`${title}\n\n${message}`)) {
+        void resetRecord();
+      }
+      return;
+    }
+
+    Alert.alert(title, message, [
+      { text: "Annuler", style: "cancel" },
+      {
+        text: "Réinitialiser",
+        style: "destructive",
+        onPress: () => {
+          void resetRecord();
+        },
+      },
+    ]);
   };
 
   const isResult = score !== NO_SCORE && !gameActive;
@@ -1728,7 +1679,7 @@ function SoloGame({ onBack }) {
         >
           <Pressable
             style={[styles.screen, { backgroundColor: getBgColor() }]}
-            onPress={handleScreenClick}
+            onPressIn={handleScreenPress}
           >
             <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
               <Text
@@ -1755,7 +1706,7 @@ function SoloGame({ onBack }) {
             ]}
             onPress={handleResetClick}
           >
-            <Text style={styles.resetButtonText}>Réinitialiser</Text>
+            <Text style={styles.resetButtonText}>Réinitialiser le record</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -1950,6 +1901,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingTop: 8,
     paddingBottom: 16,
+  },
+  headerRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  readyIndicator: {
+    backgroundColor: COLORS.accentMuted,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(99, 102, 241, 0.25)",
+  },
+  readyIndicatorText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.accent,
+    letterSpacing: 0.4,
   },
   backButton: {
     paddingVertical: 6,

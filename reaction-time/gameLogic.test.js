@@ -32,7 +32,6 @@ function readyAllPlayers(state, layout) {
   for (let playerIndex = 0; playerIndex < state.playerCount; playerIndex++) {
     const point = touch(playerIndex, playerIndex, layout, state.playerCount);
     next = applyTouchStarts(next, [point], PAD, layout);
-    next = applyTouchReleases(next, [point], true, PAD, layout);
   }
   return next;
 }
@@ -92,23 +91,21 @@ test("computePartyRankings returns empty ranks when everyone fouled", () => {
   assert.deepEqual(rankings, [null, null]);
 });
 
-test("lobby release marks players ready one by one", () => {
+test("lobby touch start marks players ready one by one", () => {
   const layout = getPartyLayout(4);
   let state = createPartyState(4);
 
   const firstFinger = touch(1, 0, layout);
   state = applyTouchStarts(state, [firstFinger], PAD, layout);
-  state = applyTouchReleases(state, [firstFinger], true, PAD, layout);
   assert.deepEqual(state.started, [true, false, false, false]);
   assert.equal(state.phase, PHASE.IDLE);
 
   const thirdFinger = touch(2, 2, layout);
   state = applyTouchStarts(state, [thirdFinger], PAD, layout);
-  state = applyTouchReleases(state, [thirdFinger], true, PAD, layout);
   assert.deepEqual(state.started, [true, false, true, false]);
 });
 
-test("lobby simultaneous release starts waiting once", () => {
+test("lobby simultaneous touch start starts waiting once", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
 
@@ -116,39 +113,37 @@ test("lobby simultaneous release starts waiting once", () => {
     touch(playerIndex, playerIndex, layout)
   );
   state = applyTouchStarts(state, fingers, PAD, layout);
-  state = applyTouchReleases(state, fingers, true, PAD, layout);
 
   assert.equal(state.phase, PHASE.WAITING);
   assert.equal(state.activeTouches.size, 0);
   assert.equal(allPlayersReady(state.started), false);
 });
 
-test("waiting touch start tracks finger without fouling", () => {
+test("waiting touch start fouls immediately", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
   state = readyAllPlayers(state, layout);
 
   state = applyTouchStarts(state, [touch(10, 0, layout)], PAD, layout);
   assert.equal(state.phase, PHASE.WAITING);
-  assert.equal(state.fouls[0], false);
-  assert.equal(state.activeTouches.size, 1);
+  assert.equal(state.fouls[0], true);
 });
 
-test("waiting release fouls a tracked finger", () => {
+test("waiting release does not foul", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
   state = readyAllPlayers(state, layout);
 
   const finger = touch(10, 2, layout);
   state = applyTouchStarts(state, [finger], PAD, layout);
-  assert.equal(state.fouls[2], false);
+  assert.equal(state.fouls[2], true);
 
-  state = applyTouchReleases(state, [finger], true, PAD, layout);
+  state = applyTouchReleases(state, [finger]);
   assert.equal(state.fouls[2], true);
   assert.equal(state.activeTouches.size, 0);
 });
 
-test("six fingers held during waiting do not foul until release", () => {
+test("six fingers held during waiting foul on press, not on release", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
   state = readyAllPlayers(state, layout);
@@ -158,72 +153,41 @@ test("six fingers held during waiting do not foul until release", () => {
   );
 
   state = applyTouchStarts(state, fingers, PAD, layout);
-  assert.deepEqual(state.fouls, [false, false, false, false, false, false]);
+  assert.deepEqual(state.fouls, [true, true, true, true, true, true]);
   assert.equal(state.activeTouches.size, 6);
 });
 
-test("releasing one of six waiting fingers fouls only that player", () => {
+test("pressing one of six waiting fingers fouls only that player", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
   state = readyAllPlayers(state, layout);
 
-  const fingers = Array.from({ length: 6 }, (_, playerIndex) =>
-    touch(playerIndex, playerIndex, layout)
-  );
-  state = applyTouchStarts(state, fingers, PAD, layout);
-
-  state = applyTouchReleases(state, [fingers[0]], true, PAD, layout);
+  state = applyTouchStarts(state, [touch(0, 0, layout)], PAD, layout);
 
   assert.deepEqual(state.fouls, [true, false, false, false, false, false]);
-  assert.equal(state.activeTouches.size, 5);
 });
 
-test("waiting release without prior touch start still fouls using position", () => {
-  const layout = getPartyLayout(6);
-  let state = createPartyState(6);
-  state = readyAllPlayers(state, layout);
-
-  const finger = touch(99, 4, layout);
-  state = applyTouchReleases(state, [finger], true, PAD, layout);
-
-  assert.equal(state.fouls[4], true);
-});
-
-test("waiting touch cancel does not foul", () => {
-  const layout = getPartyLayout(6);
-  let state = createPartyState(6);
-  state = readyAllPlayers(state, layout);
-
-  const finger = touch(10, 1, layout);
-  state = applyTouchStarts(state, [finger], PAD, layout);
-  assert.equal(state.fouls[1], false);
-
-  state = applyTouchReleases(state, [finger], false, PAD, layout);
-  assert.equal(state.fouls[1], false);
-  assert.equal(state.activeTouches.size, 0);
-});
-
-test("go phase scores only on release", () => {
+test("go phase scores only on press", () => {
   const layout = getPartyLayout(4);
   let state = createPartyState(4);
   state = readyAllPlayers(state, layout);
   beginPartyGo(state, 1000);
 
   const finger = touch(1, 0, layout);
-  state = applyTouchStarts(state, [finger], PAD, layout);
-  assert.equal(state.scores[0], null);
+  state = applyTouchStarts(state, [finger], PAD, layout, 1180);
+  assert.equal(state.scores[0], 180);
 
-  state = applyTouchReleases(state, [finger], true, PAD, layout, 1180);
+  state = applyTouchReleases(state, [finger]);
   assert.equal(state.scores[0], 180);
 });
 
-test("go phase ignores release without go timestamp", () => {
+test("go phase ignores press without go timestamp", () => {
   const layout = getPartyLayout(2);
   let state = createPartyState(2);
   state = readyAllPlayers(state, layout);
 
   const finger = touch(1, 0, layout);
-  state = applyTouchReleases(state, [finger], true, PAD, layout, 1500);
+  state = applyTouchStarts(state, [finger], PAD, layout, 1500);
   assert.equal(state.scores[0], null);
 });
 
@@ -232,25 +196,21 @@ test("round finishes when every player either scored or fouled", () => {
   let state = createPartyState(3);
   state = readyAllPlayers(state, layout);
 
-  const waitingFinger = touch(2, 1, layout);
-  state = applyTouchStarts(state, [waitingFinger], PAD, layout);
-  state = applyTouchReleases(state, [waitingFinger], true, PAD, layout);
+  state = applyTouchStarts(state, [touch(2, 1, layout)], PAD, layout);
   beginPartyGo(state, 1000);
 
-  state = applyTouchReleases(
+  state = applyTouchStarts(
     state,
     [touch(1, 0, layout)],
-    true,
     PAD,
     layout,
     1100
   );
   assert.equal(state.phase, PHASE.GO);
 
-  state = applyTouchReleases(
+  state = applyTouchStarts(
     state,
     [touch(3, 2, layout)],
-    true,
     PAD,
     layout,
     1250
@@ -281,8 +241,7 @@ test("duplicate foul on same player is ignored", () => {
 
   const finger = touch(1, 0, layout);
   state = applyTouchStarts(state, [finger], PAD, layout);
-  state = applyTouchReleases(state, [finger], true, PAD, layout);
-  state = applyTouchReleases(state, [finger], true, PAD, layout);
+  state = applyTouchStarts(state, [finger], PAD, layout);
 
   assert.deepEqual(
     state.fouls.filter(Boolean).length,
@@ -303,7 +262,7 @@ test("only one zone touch is tracked per player", () => {
   );
 
   assert.equal(state.activeTouches.size, 1);
-  assert.equal(state.fouls[0], false);
+  assert.equal(state.fouls[0], true);
 });
 
 test("getPartyZoneOrientation faces edges correctly", () => {
@@ -319,7 +278,7 @@ test("getPartyZoneOrientation faces edges correctly", () => {
   assert.equal(getPartyZoneOrientation(1, 0, layout3), "left");
 });
 
-test("placing fingers in order 1,2,4,3 during waiting does not foul other players", () => {
+test("placing fingers in order 1,2,4,3 during waiting fouls each on press", () => {
   const layout = getPartyLayout(4);
   let state = createPartyState(4);
   state = readyAllPlayers(state, layout);
@@ -329,38 +288,34 @@ test("placing fingers in order 1,2,4,3 during waiting does not foul other player
   state = applyZoneTouchStart(state, 3, 4);
   state = applyZoneTouchStart(state, 2, 3);
 
-  assert.deepEqual(state.fouls, [false, false, false, false]);
+  assert.deepEqual(state.fouls, [true, true, true, true]);
   assert.equal(state.activeTouches.size, 4);
 });
 
-test("only the player who releases during waiting is fouled", () => {
+test("only the player who presses during waiting is fouled", () => {
   const layout = getPartyLayout(4);
   let state = createPartyState(4);
   state = readyAllPlayers(state, layout);
 
   state = applyZoneTouchStart(state, 0, 1);
-  state = applyZoneTouchStart(state, 1, 2);
-  state = applyZoneTouchStart(state, 3, 4);
-  state = applyZoneTouchStart(state, 2, 3);
-
-  state = applyZoneTouchRelease(state, 0, 1, true);
 
   assert.deepEqual(state.fouls, [true, false, false, false]);
 });
 
-test("zone release ignores touches from another zone", () => {
+test("zone release clears tracking without fouling", () => {
   const layout = getPartyLayout(4);
   let state = createPartyState(4);
   state = readyAllPlayers(state, layout);
 
   state = applyZoneTouchStart(state, 0, 1);
-  state = applyZoneTouchRelease(state, 1, 1, true);
+  state = applyZoneTouchRelease(state, 0, 1);
 
-  assert.equal(state.fouls[0], false);
-  assert.equal(state.fouls[1], false);
+  assert.equal(state.fouls[0], true);
+  assert.equal(state.activeTouches.size, 0);
+  assert.equal(state.zoneArmed[0], false);
 });
 
-test("touch cancel clears visual but keeps armed for later release", () => {
+test("touch cancel clears visual but does not add extra fouls", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
   state = readyAllPlayers(state, layout);
@@ -370,32 +325,22 @@ test("touch cancel clears visual but keeps armed for later release", () => {
   }
   assert.deepEqual(state.zoneArmed, [true, true, true, true, true, true]);
 
-  // OS cancels older touches when the 6th finger lands
   for (let i = 0; i < 4; i++) {
-    state = applyZoneTouchRelease(state, i, i + 1, false);
+    state = applyZoneTouchRelease(state, i, i + 1);
   }
-  assert.deepEqual(state.zoneArmed, [true, true, true, true, true, true]);
+  assert.deepEqual(state.fouls, [true, true, true, true, true, true]);
   assert.equal(state.activeTouches.size, 2);
-
-  state = applyZoneTouchRelease(state, 0, 99, true);
-  assert.equal(state.fouls[0], true);
-  assert.equal(state.zoneArmed[0], false);
 });
 
-test("touch cancel followed by touch start during waiting does not foul", () => {
+test("re-pressing after touch cancel during waiting does not double foul", () => {
   const layout = getPartyLayout(6);
   let state = createPartyState(6);
   state = readyAllPlayers(state, layout);
 
   state = applyZoneTouchStart(state, 0, 1);
-  state = applyZoneTouchRelease(state, 0, 1, false);
-
-  assert.equal(state.activeTouches.size, 0);
-  assert.equal(state.zoneArmed[0], true);
-
+  state = applyZoneTouchRelease(state, 0, 1);
   state = applyZoneTouchStart(state, 0, 2);
 
-  assert.equal(state.fouls[0], false);
-  assert.equal(state.zoneArmed[0], true);
+  assert.equal(state.fouls.filter(Boolean).length, 1);
   assert.equal(state.activeTouches.get(2), 0);
 });
