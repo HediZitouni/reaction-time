@@ -20,9 +20,16 @@ import {
 } from "./gameLogic";
 import { gameNow } from "./timing";
 import {
-  loadBestScore,
-  saveBestScore,
-  clearPersistedBestScore,
+  STAT_KEYS,
+  loadStats,
+  computeAverage,
+  computeMedian,
+  computeWorst,
+  getGamesPlayed,
+  recordValidGame,
+  recordFalseStart,
+  resetStat,
+  resetAllStats,
 } from "./storage";
 
 const COLORS = {
@@ -95,6 +102,222 @@ function ReadyIndicator({ readyCount, playerCount, phase }) {
 function formatRank(rank) {
   if (rank === 1) return "1er";
   return `${rank}e`;
+}
+
+function confirmDestructive({ title, message, onConfirm }) {
+  if (Platform.OS === "web") {
+    if (window.confirm(`${title}\n\n${message}`)) {
+      onConfirm();
+    }
+    return;
+  }
+
+  Alert.alert(title, message, [
+    { text: "Annuler", style: "cancel" },
+    {
+      text: "Réinitialiser",
+      style: "destructive",
+      onPress: onConfirm,
+    },
+  ]);
+}
+
+function StatRow({ label, value, onReset, canReset = true, isLast = false }) {
+  return (
+    <View style={[styles.statRow, isLast && styles.statRowLast]}>
+      <View style={styles.statInfo}>
+        <Text style={styles.statLabel}>{label}</Text>
+        <Text style={styles.statValue}>{value}</Text>
+      </View>
+      {canReset ? (
+        <Pressable
+          style={({ pressed }) => [
+            styles.statResetButton,
+            pressed && styles.statResetButtonPressed,
+          ]}
+          onPress={onReset}
+          accessibilityLabel={`Réinitialiser ${label}`}
+        >
+          <Text style={styles.statResetButtonText}>Effacer</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function StatsScreen({ onBack }) {
+  const [stats, setStats] = useState(null);
+
+  const refreshStats = useCallback(async () => {
+    setStats(await loadStats());
+  }, []);
+
+  useEffect(() => {
+    void refreshStats();
+  }, [refreshStats]);
+
+  const record = stats?.record ?? null;
+  const gamesPlayed = stats ? getGamesPlayed(stats) : 0;
+  const average = stats ? computeAverage(stats) : null;
+  const median = stats ? computeMedian(stats) : null;
+  const worst = stats ? computeWorst(stats) : null;
+  const hasTimeHistory = gamesPlayed > 0;
+  const hasAnyStats =
+    record !== null ||
+    hasTimeHistory ||
+    (stats?.falseStarts ?? 0) > 0;
+  const timeHistoryResetMessage =
+    "L'historique des temps, le compteur de parties, la moyenne, la médiane et le pire temps seront effacés.";
+
+  const handleResetAll = () => {
+    confirmDestructive({
+      title: "Tout effacer ?",
+      message:
+        "Toutes vos statistiques seront effacées définitivement : record, parties jouées, faux départs et historique des temps.",
+      onConfirm: async () => {
+        const cleared = await resetAllStats();
+        if (cleared) {
+          setStats(cleared);
+        } else {
+          await refreshStats();
+        }
+      },
+    });
+  };
+
+  const handleReset = (statKey, title, message) => {
+    confirmDestructive({
+      title,
+      message,
+      onConfirm: async () => {
+        const result = await resetStat(statKey);
+        if (result?.stats) {
+          setStats(result.stats);
+        } else {
+          await refreshStats();
+        }
+      },
+    });
+  };
+
+  return (
+    <View style={styles.root}>
+      <StatusBar style="light" />
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.header}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.backButton,
+              styles.statsBackButton,
+              pressed && styles.backButtonPressed,
+            ]}
+            onPress={onBack}
+          >
+            <Text style={styles.backButtonText}>‹ Retour</Text>
+          </Pressable>
+          <Text style={styles.statsTitle}>Stats</Text>
+          <View style={styles.statsBackButton} />
+        </View>
+
+        <View style={styles.statsContent}>
+          <View style={styles.statsCard}>
+            <StatRow
+              label="Record"
+              value={record !== null ? `${record} ms` : "—"}
+              canReset={record !== null}
+              onReset={() =>
+                handleReset(
+                  STAT_KEYS.RECORD,
+                  "Réinitialiser le record ?",
+                  "Votre meilleur temps sera effacé définitivement."
+                )
+              }
+            />
+            <StatRow
+              label="Parties jouées"
+              value={stats ? String(gamesPlayed) : "—"}
+              canReset={hasTimeHistory}
+              onReset={() =>
+                handleReset(
+                  STAT_KEYS.GAMES_PLAYED,
+                  "Réinitialiser les parties jouées ?",
+                  timeHistoryResetMessage
+                )
+              }
+            />
+            <StatRow
+              label="Faux départs"
+              value={stats ? String(stats.falseStarts) : "—"}
+              canReset={stats !== null && stats.falseStarts > 0}
+              onReset={() =>
+                handleReset(
+                  STAT_KEYS.FALSE_STARTS,
+                  "Réinitialiser les faux départs ?",
+                  "Le compteur de faux départs sera remis à zéro."
+                )
+              }
+            />
+            <StatRow
+              label="Temps moyen"
+              value={average !== null ? `${average} ms` : "—"}
+              canReset={hasTimeHistory}
+              onReset={() =>
+                handleReset(
+                  STAT_KEYS.AVERAGE,
+                  "Réinitialiser le temps moyen ?",
+                  timeHistoryResetMessage
+                )
+              }
+            />
+            <StatRow
+              label="Temps médian"
+              value={median !== null ? `${median} ms` : "—"}
+              canReset={hasTimeHistory}
+              onReset={() =>
+                handleReset(
+                  STAT_KEYS.MEDIAN,
+                  "Réinitialiser le temps médian ?",
+                  timeHistoryResetMessage
+                )
+              }
+            />
+            <StatRow
+              label="Pire temps"
+              value={worst !== null ? `${worst} ms` : "—"}
+              canReset={hasTimeHistory}
+              onReset={() =>
+                handleReset(
+                  STAT_KEYS.WORST,
+                  "Réinitialiser le pire temps ?",
+                  timeHistoryResetMessage
+                )
+              }
+              isLast
+            />
+          </View>
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.clearAllButton,
+              !hasAnyStats && styles.clearAllButtonDisabled,
+              pressed && hasAnyStats && styles.clearAllButtonPressed,
+            ]}
+            onPress={handleResetAll}
+            disabled={!hasAnyStats}
+          >
+            <Text
+              style={[
+                styles.clearAllButtonText,
+                !hasAnyStats && styles.clearAllButtonTextDisabled,
+              ]}
+            >
+              Tout effacer
+            </Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    </View>
+  );
 }
 
 function HomeScreen({ onSelectPlay }) {
@@ -1483,7 +1706,7 @@ function MultiGame({ onBack }) {
   );
 }
 
-function SoloGame({ onBack }) {
+function SoloGame({ onBack, onOpenStats }) {
   const [gameActive, setGameActive] = useState(false);
   const [timerActive, setTimerActive] = useState(false);
   const [score, setScore] = useState(NO_SCORE);
@@ -1502,26 +1725,15 @@ function SoloGame({ onBack }) {
   useEffect(() => {
     let active = true;
 
-    loadBestScore().then((saved) => {
-      if (!active || saved === null) return;
-      const current = bestScoreRef.current;
-      const next = current === NO_SCORE ? saved : Math.min(current, saved);
-      bestScoreRef.current = next;
-      setBestScore(next);
+    loadStats().then((saved) => {
+      if (!active || saved.record === null) return;
+      bestScoreRef.current = saved.record;
+      setBestScore(saved.record);
     });
 
     return () => {
       active = false;
     };
-  }, []);
-
-  const applyBestScore = useCallback((newScore) => {
-    if (!Number.isFinite(newScore) || newScore < 0) return;
-    if (newScore >= bestScoreRef.current) return;
-
-    bestScoreRef.current = newScore;
-    setBestScore(newScore);
-    void saveBestScore(newScore);
   }, []);
 
   const getBgColor = () => {
@@ -1569,7 +1781,11 @@ function SoloGame({ onBack }) {
       setMessage(`${newScore}`);
       setSubtitle("millisecondes");
       setScore(newScore);
-      applyBestScore(newScore);
+      void recordValidGame(newScore).then((saved) => {
+        if (!saved || saved.record === null) return;
+        bestScoreRef.current = saved.record;
+        setBestScore(saved.record);
+      });
       Animated.sequence([
         Animated.timing(fadeAnim, {
           toValue: 0.3,
@@ -1613,40 +1829,8 @@ function SoloGame({ onBack }) {
       setTooEarly(true);
       setMessage("Trop tôt !");
       setSubtitle("Réessayez");
+      void recordFalseStart();
     }
-  };
-
-  const resetRecord = async () => {
-    setTooEarly(false);
-    setScore(NO_SCORE);
-    bestScoreRef.current = NO_SCORE;
-    setBestScore(NO_SCORE);
-    setMessage("Appuyez pour commencer");
-    setSubtitle("Testez votre temps de réaction");
-    await clearPersistedBestScore();
-  };
-
-  const handleResetClick = () => {
-    const title = "Réinitialiser le record ?";
-    const message = "Votre meilleur temps sera effacé définitivement.";
-
-    if (Platform.OS === "web") {
-      if (window.confirm(`${title}\n\n${message}`)) {
-        void resetRecord();
-      }
-      return;
-    }
-
-    Alert.alert(title, message, [
-      { text: "Annuler", style: "cancel" },
-      {
-        text: "Réinitialiser",
-        style: "destructive",
-        onPress: () => {
-          void resetRecord();
-        },
-      },
-    ]);
   };
 
   const isResult = score !== NO_SCORE && !gameActive;
@@ -1701,12 +1885,12 @@ function SoloGame({ onBack }) {
         <View style={styles.footer}>
           <Pressable
             style={({ pressed }) => [
-              styles.resetButton,
-              pressed && styles.resetButtonPressed,
+              styles.statsNavButton,
+              pressed && styles.statsNavButtonPressed,
             ]}
-            onPress={handleResetClick}
+            onPress={onOpenStats}
           >
-            <Text style={styles.resetButtonText}>Réinitialiser le record</Text>
+            <Text style={styles.statsNavButtonText}>Stats</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -1752,7 +1936,16 @@ export default function App() {
     return <MultiGame onBack={() => setScreen("player-setup")} />;
   }
 
-  return <SoloGame onBack={() => setScreen("player-setup")} />;
+  if (screen === "stats") {
+    return <StatsScreen onBack={() => setScreen("solo")} />;
+  }
+
+  return (
+    <SoloGame
+      onBack={() => setScreen("player-setup")}
+      onOpenStats={() => setScreen("stats")}
+    />
+  );
 }
 
 const styles = StyleSheet.create({
@@ -2173,23 +2366,119 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingBottom: 24,
   },
-  resetButton: {
-    backgroundColor: "rgba(255, 255, 255, 0.06)",
+  statsNavButton: {
+    backgroundColor: COLORS.accentMuted,
     borderRadius: 16,
     paddingVertical: 16,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: "rgba(99, 102, 241, 0.25)",
   },
-  resetButtonPressed: {
-    backgroundColor: "rgba(255, 255, 255, 0.1)",
+  statsNavButtonPressed: {
+    backgroundColor: "rgba(99, 102, 241, 0.25)",
     transform: [{ scale: 0.98 }],
   },
-  resetButtonText: {
+  statsNavButtonText: {
     fontSize: 16,
     fontWeight: "600",
-    color: COLORS.textMuted,
+    color: COLORS.accent,
     letterSpacing: 0.3,
+  },
+  headerSpacer: {
+    width: 72,
+  },
+  statsBackButton: {
+    minWidth: 72,
+  },
+  statsTitle: {
+    flex: 1,
+    fontSize: 17,
+    fontWeight: "700",
+    color: COLORS.text,
+    letterSpacing: 0.2,
+    textAlign: "center",
+  },
+  statsContent: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 8,
+  },
+  statsCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    overflow: "hidden",
+  },
+  statRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  statRowLast: {
+    borderBottomWidth: 0,
+  },
+  statInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  statLabel: {
+    fontSize: 14,
+    fontWeight: "500",
+    color: COLORS.textMuted,
+  },
+  statValue: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: COLORS.text,
+    letterSpacing: -0.5,
+  },
+  statResetButton: {
+    marginLeft: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  statResetButtonPressed: {
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    transform: [{ scale: 0.96 }],
+  },
+  statResetButtonText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: COLORS.textMuted,
+  },
+  clearAllButton: {
+    marginTop: 24,
+    backgroundColor: "rgba(220, 38, 38, 0.12)",
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(220, 38, 38, 0.35)",
+  },
+  clearAllButtonPressed: {
+    backgroundColor: "rgba(220, 38, 38, 0.2)",
+    transform: [{ scale: 0.98 }],
+  },
+  clearAllButtonDisabled: {
+    opacity: 0.4,
+  },
+  clearAllButtonText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#f87171",
+    letterSpacing: 0.3,
+  },
+  clearAllButtonTextDisabled: {
+    color: COLORS.textMuted,
   },
   partySetupContent: {
     flex: 1,

@@ -7,7 +7,7 @@
   },
   "scripts": {
     "start": "expo start",
-    "test": "node --test gameLogic.test.js",
+    "test": "node --test gameLogic.test.js storage.test.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web"
